@@ -1,0 +1,15 @@
+name = "comments"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-08-23"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "d1-comments"
+database_id = "d8b8d25d-822b-4c50-b560-35031b9895d3"
+
+[[routes]]
+pattern = "comments.hanyuone.live"
+custom_domain = true
