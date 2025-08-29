@@ -1,0 +1,15 @@
+DROP TABLE IF EXISTS Comments;
+DROP TABLE IF EXISTS Posts;
+
+CREATE TABLE IF NOT EXISTS Posts (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS Comments (
+    id INTEGER PRIMARY KEY,
+    post_id INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    contents TEXT NOT NULL,
+    FOREIGN KEY(post_id) REFERENCES Posts(id)
+);
