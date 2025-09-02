@@ -2,44 +2,27 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
-    routing::get,
+    middleware,
+    routing::{delete, get, post},
     Router,
 };
+use dotenv::dotenv;
 use std::result::Result;
 use tower_service::Service;
 use worker::*;
 
-use crate::schema::{Comment, NewComment, Post};
+use crate::{
+    auth::{auth_middleware, get_session, login, logout},
+    error::AppError,
+    schema::{Comment, NewComment, Post},
+};
 
+mod auth;
+mod error;
 mod schema;
 
 struct AppState {
     env: Env,
-}
-
-enum AppError {
-    WorkerError(worker::Error),
-    PostNotFound(String),
-}
-
-impl From<worker::Error> for AppError {
-    fn from(value: worker::Error) -> Self {
-        AppError::WorkerError(value)
-    }
-}
-
-impl axum::response::IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        match self {
-            AppError::WorkerError(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-            AppError::PostNotFound(slug) => (
-                StatusCode::NOT_FOUND,
-                format!("Could not find post with slug {slug} in database"),
-            ),
-        }
-        .into_response()
-    }
 }
 
 #[send]
@@ -115,13 +98,24 @@ async fn fetch(
     env: Env,
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>, worker::Error> {
+    dotenv().ok();
+
     console_error_panic_hook::set_once();
 
     let shared_state = Arc::new(AppState { env });
 
     let mut router = Router::new()
+        // Endpoints requiring login
         .route("/post/{slug}", get(get_post).post(create_post))
         .route("/comment/{id}", get(get_comments).post(create_comment))
+        .route_layer(middleware::from_fn_with_state(
+            shared_state.clone(),
+            auth_middleware,
+        ))
+        // Authorisation
+        .route("/auth/login", post(login))
+        .route("/auth/access_token", post(get_session))
+        .route("/auth/logout", delete(logout))
         .with_state(shared_state);
 
     Ok(router.call(req).await?)

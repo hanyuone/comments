@@ -17,3 +17,10 @@ pub struct NewComment {
     pub username: String,
     pub contents: String,
 }
+
+#[derive(Deserialize, Serialize)]
+pub struct User {
+    #[serde(rename(serialize = "login"))]
+    pub username: String,
+    pub avatar_url: String,
+}

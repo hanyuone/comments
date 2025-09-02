@@ -14,6 +14,12 @@ crate-type = ["cdylib"]
 worker = { version = "0.6", features = ["http", "axum", "d1"] }
 worker-macros = { version = "0.6" }
 console_error_panic_hook = { version = "0.1.7" }
-axum = { version = "0.8.4", features = ["json"], default-features = false }
+axum = { version = "0.8.4", features = ["json", "macros", "query"], default-features = false }
 tower-service = "0.3.3"
 serde = "1.0.219"
+oauth2 = "5.0.0"
+dotenv = "0.15.0"
+axum-extra = "0.10.1"
+reqwest = { version = "0.12.23", features = ["json"] }
+uuid = { version = "1.18.1", features = ["v7"] }
+chrono = "0.4.41"
