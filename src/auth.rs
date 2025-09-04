@@ -1,13 +1,12 @@
-use std::{env, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     extract::{Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::Next,
-    response::{AppendHeaders, IntoResponse, Redirect, Response},
+    response::{Redirect, Response},
 };
-use axum_extra::extract::Host;
-use chrono::Utc;
+use axum_extra::extract::{cookie::Cookie, CookieJar};
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     EndpointNotSet, EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
@@ -15,17 +14,20 @@ use oauth2::{
 };
 use reqwest::{header::AUTHORIZATION, ClientBuilder};
 use serde::Deserialize;
+use time::{Duration, OffsetDateTime};
 use uuid::{NoContext, Timestamp, Uuid};
 use worker::send;
 
 use crate::{error::AppError, schema::User, AppState};
 
 fn get_client(
-    hostname: String,
+    state: Arc<AppState>,
+    uri: Uri,
 ) -> BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet> {
     // Environment variables are guaranteed to exist, safe to unwrap
-    let client_id = ClientId::new(env::var("GITHUB_CLIENT_ID").unwrap());
-    let client_secret = ClientSecret::new(env::var("GITHUB_CLIENT_SECRET").unwrap());
+    let client_id = ClientId::new(state.env.var("GITHUB_CLIENT_ID").unwrap().to_string());
+    let client_secret =
+        ClientSecret::new(state.env.var("GITHUB_CLIENT_SECRET").unwrap().to_string());
 
     // GitHub-supplied authorisation/token-distribution URLs
     let auth_url = AuthUrl::new("https://github.com/login/oauth/authorize".to_string()).unwrap();
@@ -34,13 +36,12 @@ fn get_client(
 
     // On the client side, redirect back to `/oauth/github`, which will call `/auth/return`
     // to get the access token
-    let protocol = if hostname.starts_with("localhost") || hostname.starts_with("127.0.0.1") {
-        "http"
-    } else {
-        "https"
-    };
-
-    let redirect_url = RedirectUrl::new(format!("{protocol}//{hostname}/oauth/github")).unwrap();
+    let redirect_url = RedirectUrl::new(format!(
+        "{}://{}/oauth/github",
+        uri.scheme_str().unwrap(),
+        uri.authority().unwrap().as_str()
+    ))
+    .unwrap();
 
     let client = BasicClient::new(client_id)
         .set_client_secret(client_secret)
@@ -51,13 +52,40 @@ fn get_client(
     client
 }
 
+#[send]
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,
-) -> Response {
+) -> Result<Response, AppError> {
+    // Fetch session ID
+    let headers = request.headers();
+    let cookie_jar = CookieJar::from_headers(headers);
+
+    let Some(session_cookie) = cookie_jar.get("session_id") else {
+        return Err(AppError::Unauthorised);
+    };
+
+    // Check if we have valid session ID (i.e. corresponds to entry in
+    // UserSessions table that is not expired)
+    let d1 = state.env.d1("DB")?;
+
+    let auth_statement = d1
+        .prepare("SELECT expires_at FROM UserSessions WHERE id = ?")
+        .bind(&[session_cookie.value().into()])?;
+
+    let Some(expires_timestamp) = auth_statement.first::<i64>(Some("expires_at")).await? else {
+        return Err(AppError::Unauthorised);
+    };
+
+    // Timestamps stored in database will not be out-of-bounds
+    let expires_at = OffsetDateTime::from_unix_timestamp(expires_timestamp).unwrap();
+    if OffsetDateTime::now_utc() >= expires_at {
+        return Err(AppError::Unauthorised);
+    }
+
     let response = next.run(request).await;
-    response
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -77,11 +105,11 @@ pub struct LoginQuery {
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LoginQuery>,
-    Host(hostname): Host,
+    uri: Uri,
 ) -> Result<Redirect, AppError> {
     let d1 = state.env.d1("DB")?;
 
-    let client = get_client(hostname);
+    let client = get_client(state, uri);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -125,11 +153,12 @@ pub struct AccessTokenQuery {
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AccessTokenQuery>,
-    Host(hostname): Host,
-) -> Result<impl IntoResponse, AppError> {
+    uri: Uri,
+    jar: CookieJar,
+) -> Result<(CookieJar, Redirect), AppError> {
     let d1 = state.env.d1("DB")?;
 
-    let client = get_client(hostname);
+    let client = get_client(state, uri);
 
     // Fetch state left over from `/auth/login`
     let state = CsrfToken::new(query.state);
@@ -201,8 +230,10 @@ pub async fn get_session(
     };
 
     // Create session from user ID
-    let created_at = Utc::now().timestamp();
-    let timestamp = Timestamp::from_unix(NoContext, created_at as u64, 0);
+    let created_at = OffsetDateTime::now_utc();
+    let expires_at = created_at + Duration::days(1);
+
+    let timestamp = Timestamp::from_unix(NoContext, created_at.unix_timestamp() as u64, 0);
     let session_id = Uuid::new_v7(timestamp).to_string();
 
     let session_statement = d1
@@ -212,20 +243,41 @@ pub async fn get_session(
         .bind(&[
             session_id.clone().into(),
             user_id.into(),
-            created_at.into(),
-            (created_at + 60 * 60 * 24).into(),
+            created_at.unix_timestamp().into(),
+            expires_at.unix_timestamp().into(),
         ])?;
     session_statement.run().await?;
 
     // Set session as cookie
-    let headers = AppendHeaders([(
-        axum::http::header::SET_COOKIE,
-        "session_token=".to_owned() + &session_id + "; path=/; httponly; secure; samesite=strict",
-    )]);
+    let jar = jar.add(Cookie::build(("session_id", session_id)).expires(expires_at));
 
-    Ok((headers, Redirect::to(&return_url)))
+    Ok((jar, Redirect::to(&return_url)))
 }
 
-pub async fn logout() -> Result<(), AppError> {
-    Ok(())
+/// Logs a user out by removing their session cookie.
+///
+/// # Errors
+///
+/// This function will return an error if something is wrong with Cloudflare's
+/// services.
+#[send]
+pub async fn logout(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Result<CookieJar, AppError> {
+    // No cookie to remove
+    let Some(session_cookie) = jar.get("session_id") else {
+        return Ok(jar);
+    };
+
+    // Remove session ID from sessions table
+    let d1 = state.env.d1("DB")?;
+    let session_statement = d1
+        .prepare("DELETE FROM UserSessions WHERE session_id = ?")
+        .bind(&[session_cookie.value().into()])?;
+    session_statement.run().await?;
+
+    // Remove session cookie
+    let jar = jar.remove("session_id");
+    Ok(jar)
 }

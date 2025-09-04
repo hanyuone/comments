@@ -6,7 +6,6 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use dotenv::dotenv;
 use std::result::Result;
 use tower_service::Service;
 use worker::*;
@@ -98,8 +97,6 @@ async fn fetch(
     env: Env,
     _ctx: Context,
 ) -> Result<axum::http::Response<axum::body::Body>, worker::Error> {
-    dotenv().ok();
-
     console_error_panic_hook::set_once();
 
     let shared_state = Arc::new(AppState { env });

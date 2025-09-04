@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS UserSessions (
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     FOREIGN KEY(user_id) REFERENCES Users(id)
-)
+);
 
 CREATE TABLE IF NOT EXISTS Posts (
     id INTEGER PRIMARY KEY,
