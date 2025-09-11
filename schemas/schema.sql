@@ -21,8 +21,8 @@ CREATE TABLE IF NOT EXISTS OAuthState (
 CREATE TABLE IF NOT EXISTS UserSessions (
     id TEXT NOT NULL UNIQUE,
     user_id INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
     FOREIGN KEY(user_id) REFERENCES Users(id)
 );
 
@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS Posts (
 CREATE TABLE IF NOT EXISTS Comments (
     id INTEGER PRIMARY KEY,
     post_id INTEGER NOT NULL,
-    username TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
     contents TEXT NOT NULL,
-    FOREIGN KEY(post_id) REFERENCES Posts(id)
+    FOREIGN KEY(post_id) REFERENCES Posts(id),
+    FOREIGN KEY(user_id) REFERENCES Users(id)
 );

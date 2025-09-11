@@ -2,27 +2,28 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, Uri},
+    http::{HeaderValue, StatusCode},
     middleware::Next,
     response::{Redirect, Response},
 };
-use axum_extra::extract::{cookie::Cookie, CookieJar};
+use axum_extra::extract::{cookie::Cookie, CookieJar, Host};
+use http::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     EndpointNotSet, EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
     RequestTokenError, TokenResponse, TokenUrl,
 };
-use reqwest::{header::AUTHORIZATION, ClientBuilder};
 use serde::Deserialize;
 use time::{Duration, OffsetDateTime};
+use ureq::Agent;
 use uuid::{NoContext, Timestamp, Uuid};
 use worker::send;
 
-use crate::{error::AppError, schema::User, AppState};
+use crate::{error::AppError, AppState};
 
 fn get_client(
     state: Arc<AppState>,
-    uri: Uri,
+    hostname: String,
 ) -> BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet> {
     // Environment variables are guaranteed to exist, safe to unwrap
     let client_id = ClientId::new(state.env.var("GITHUB_CLIENT_ID").unwrap().to_string());
@@ -36,12 +37,14 @@ fn get_client(
 
     // On the client side, redirect back to `/oauth/github`, which will call `/auth/return`
     // to get the access token
-    let redirect_url = RedirectUrl::new(format!(
-        "{}://{}/oauth/github",
-        uri.scheme_str().unwrap(),
-        uri.authority().unwrap().as_str()
-    ))
-    .unwrap();
+    let protocol = if hostname.starts_with("localhost") || hostname.starts_with("127.0.0.1") {
+        "http"
+    } else {
+        "https"
+    };
+
+    let redirect_url =
+        RedirectUrl::new(format!("{}://{}/auth/session", protocol, hostname)).unwrap();
 
     let client = BasicClient::new(client_id)
         .set_client_secret(client_secret)
@@ -52,10 +55,16 @@ fn get_client(
     client
 }
 
+#[derive(Deserialize)]
+struct SessionVerifyFields {
+    user_id: i32,
+    expires_at: String,
+}
+
 #[send]
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
     // Fetch session ID
@@ -71,18 +80,23 @@ pub async fn auth_middleware(
     let d1 = state.env.d1("DB")?;
 
     let auth_statement = d1
-        .prepare("SELECT expires_at FROM UserSessions WHERE id = ?")
+        .prepare("SELECT (user_id, expires_at) FROM UserSessions WHERE id = ?")
         .bind(&[session_cookie.value().into()])?;
 
-    let Some(expires_timestamp) = auth_statement.first::<i64>(Some("expires_at")).await? else {
+    let Some(session_fields) = auth_statement.first::<SessionVerifyFields>(None).await? else {
         return Err(AppError::Unauthorised);
     };
 
     // Timestamps stored in database will not be out-of-bounds
+    let expires_timestamp = session_fields.expires_at.parse::<i64>().unwrap();
     let expires_at = OffsetDateTime::from_unix_timestamp(expires_timestamp).unwrap();
     if OffsetDateTime::now_utc() >= expires_at {
         return Err(AppError::Unauthorised);
     }
+
+    // Add user ID as Axum extension
+    let extensions = request.extensions_mut();
+    extensions.insert(session_fields.user_id);
 
     let response = next.run(request).await;
     Ok(response)
@@ -105,11 +119,11 @@ pub struct LoginQuery {
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LoginQuery>,
-    uri: Uri,
+    Host(host): Host,
 ) -> Result<Redirect, AppError> {
     let d1 = state.env.d1("DB")?;
 
-    let client = get_client(state, uri);
+    let client = get_client(state, host);
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -140,6 +154,18 @@ pub struct AccessTokenQuery {
     code: String,
 }
 
+#[derive(Deserialize)]
+struct OAuthState {
+    pkce_verifier: String,
+    return_url: String,
+}
+
+#[derive(Deserialize)]
+struct GithubUser {
+    login: String,
+    avatar_url: String,
+}
+
 /// Given a temporary code from GitHub, performs OAuth2 authentication
 /// on that code, and returns a user session.
 ///
@@ -153,74 +179,90 @@ pub struct AccessTokenQuery {
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AccessTokenQuery>,
-    uri: Uri,
+    Host(host): Host,
     jar: CookieJar,
 ) -> Result<(CookieJar, Redirect), AppError> {
     let d1 = state.env.d1("DB")?;
 
-    let client = get_client(state, uri);
+    let client = get_client(state, host);
 
     // Fetch state left over from `/auth/login`
     let state = CsrfToken::new(query.state);
     let code = AuthorizationCode::new(query.code);
 
     let fetch_state_statement = d1
-        .prepare(
-            "DELETE FROM OAuthState WHERE csrf_state = ? RETURNING (pkce_verifier, return_url)",
-        )
+        .prepare("DELETE FROM OAuthState WHERE csrf_token = ? RETURNING pkce_verifier, return_url")
         .bind(&[state.secret().into()])?;
-    let (pkce_verifier, return_url) = fetch_state_statement
-        .first::<(String, String)>(None)
+    let state = fetch_state_statement
+        .first::<OAuthState>(None)
         .await?
         .ok_or(AppError::Unauthorised)?;
 
-    let pkce_verifier = PkceCodeVerifier::new(pkce_verifier);
+    web_sys::console::log_1(&"Retrieved OAuth state data".to_string().into());
+
+    let pkce_verifier = PkceCodeVerifier::new(state.pkce_verifier);
+
+    let http_client: Agent = Agent::config_builder().max_redirects(0).build().into();
 
     // Fetch access token from server
-    let token_response = client
-        .exchange_code(code)
-        .set_pkce_verifier(pkce_verifier)
-        .request_async(&oauth2::reqwest::Client::new())
-        .await
-        .map_err(|e| match e {
-            RequestTokenError::ServerResponse(_) => AppError::Unauthorised,
-            RequestTokenError::Request(error) => {
-                AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-            }
-            RequestTokenError::Parse(error, _) => {
-                AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-            }
-            RequestTokenError::Other(message) => {
-                AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, message)
-            }
-        })?;
+    let token_response = tokio::task::spawn_blocking(move || {
+        client
+            .exchange_code(code)
+            .set_pkce_verifier(pkce_verifier)
+            .request(&http_client)
+    })
+    .await
+    .map_err(|e| AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| match e {
+        RequestTokenError::ServerResponse(_) => AppError::Unauthorised,
+        RequestTokenError::Request(error) => {
+            web_sys::console::log_1(&"Request error".into());
+            AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+        RequestTokenError::Parse(error, bits) => {
+            web_sys::console::log_1(&String::from_utf8(bits).unwrap().into());
+            AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+        RequestTokenError::Other(message) => {
+            web_sys::console::log_1(&"Other error".into());
+            AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
+    })?;
 
+    web_sys::console::log_1(&"Fetched access token".to_string().into());
     let access_token = token_response.access_token().secret();
 
     // Fetch user ID, creating a user if they don't already exist
-    let mut headers = HeaderMap::new();
-    headers.append(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {access_token}")).unwrap(),
-    );
-
-    let client = ClientBuilder::new().default_headers(headers).build()?;
-    let user = client
-        .get("https://api.github.com/user")
-        .send()
-        .await?
-        .json::<User>()
-        .await?;
+    let user = ureq::get("https://api.github.com/user")
+        .header(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {access_token}")).unwrap(),
+        )
+        .header(
+            ACCEPT,
+            HeaderValue::from_str("application/vnd.github+json").unwrap(),
+        )
+        .header(
+            "X-Github-Api-Version",
+            HeaderValue::from_str("2022-11-28").unwrap(),
+        )
+        .header(
+            USER_AGENT,
+            HeaderValue::from_str("hanyuone.live Comments").unwrap(),
+        )
+        .call()?
+        .body_mut()
+        .read_json::<GithubUser>()?;
 
     let user_statement = d1.prepare("SELECT id FROM Users WHERE username = ?");
-    let user_query = user_statement.bind(&[user.username.clone().into()])?;
+    let user_query = user_statement.bind(&[user.login.clone().into()])?;
 
     let user_id = match user_query.first::<i32>(Some("id")).await? {
         Some(id) => id,
         None => {
             let insert_user_statement = d1
                 .prepare("INSERT INTO Users(username, avatar_url) VALUES (?, ?) RETURNING id")
-                .bind(&[user.username.into(), user.avatar_url.into()])?;
+                .bind(&[user.login.into(), user.avatar_url.into()])?;
 
             insert_user_statement
                 .first::<i32>(Some("id"))
@@ -243,15 +285,15 @@ pub async fn get_session(
         .bind(&[
             session_id.clone().into(),
             user_id.into(),
-            created_at.unix_timestamp().into(),
-            expires_at.unix_timestamp().into(),
+            created_at.unix_timestamp().to_string().into(),
+            expires_at.unix_timestamp().to_string().into(),
         ])?;
     session_statement.run().await?;
 
     // Set session as cookie
     let jar = jar.add(Cookie::build(("session_id", session_id)).expires(expires_at));
 
-    Ok((jar, Redirect::to(&return_url)))
+    Ok((jar, Redirect::to(&state.return_url)))
 }
 
 /// Logs a user out by removing their session cookie.
