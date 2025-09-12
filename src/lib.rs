@@ -139,7 +139,10 @@ async fn fetch(
             axum::http::Method::DELETE,
         ])
         .allow_headers([axum::http::header::CONTENT_TYPE])
-        .allow_origin(["http://localhost:8080".parse().unwrap()]);
+        .allow_origin([
+            "http://127.0.0.1:8080".parse().unwrap(),
+            "https://hanyuone.live".parse().unwrap(),
+        ]);
 
     let mut router = Router::new()
         // Endpoints requiring login

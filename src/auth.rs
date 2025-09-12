@@ -6,7 +6,10 @@ use axum::{
     middleware::Next,
     response::{Redirect, Response},
 };
-use axum_extra::extract::{cookie::Cookie, CookieJar, Host};
+use axum_extra::extract::{
+    cookie::{Cookie, SameSite},
+    CookieJar, Host,
+};
 use http::{
     header::{ACCEPT, AUTHORIZATION, USER_AGENT},
     HeaderMap, StatusCode,
@@ -287,7 +290,14 @@ pub async fn get_session(
     );
 
     // Set session as cookie
-    let jar = jar.add(Cookie::build(("session_id", session_id)).expires(expires_at));
+    let jar = jar.add(
+        Cookie::build(("session_id", session_id))
+            .domain(".hanyuone.live")
+            .path("/")
+            .expires(expires_at)
+            .http_only(true)
+            .same_site(SameSite::Strict),
+    );
     Ok((jar, Redirect::to(&state.return_url)))
 }
 
