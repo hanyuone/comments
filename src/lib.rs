@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod auth;
+mod client;
 mod error;
 mod schema;
 

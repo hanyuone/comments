@@ -2,24 +2,26 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Query, Request, State},
-    http::{HeaderValue, StatusCode},
+    http::HeaderValue,
     middleware::Next,
     response::{Redirect, Response},
 };
 use axum_extra::extract::{cookie::Cookie, CookieJar, Host};
-use http::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
+use http::{
+    header::{ACCEPT, AUTHORIZATION, USER_AGENT},
+    HeaderMap, StatusCode,
+};
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    EndpointNotSet, EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-    RequestTokenError, TokenResponse, TokenUrl,
+    EndpointNotSet, EndpointSet, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, TokenResponse,
+    TokenUrl,
 };
 use serde::Deserialize;
 use time::{Duration, OffsetDateTime};
-use ureq::Agent;
 use uuid::{NoContext, Timestamp, Uuid};
-use worker::send;
+use worker::{send, Fetch, RequestInit};
 
-use crate::{error::AppError, AppState};
+use crate::{client::WorkerClient, error::AppError, AppState};
 
 fn get_client(
     state: Arc<AppState>,
@@ -68,6 +70,8 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, AppError> {
     // Fetch session ID
+    web_sys::console::log_1(&"Triggering auth middleware".into());
+
     let headers = request.headers();
     let cookie_jar = CookieJar::from_headers(headers);
 
@@ -198,61 +202,47 @@ pub async fn get_session(
         .await?
         .ok_or(AppError::Unauthorised)?;
 
-    web_sys::console::log_1(&"Retrieved OAuth state data".to_string().into());
-
     let pkce_verifier = PkceCodeVerifier::new(state.pkce_verifier);
-
-    let http_client: Agent = Agent::config_builder().max_redirects(0).build().into();
+    let http_client = WorkerClient::new();
 
     // Fetch access token from server
-    let token_response = tokio::task::spawn_blocking(move || {
-        client
-            .exchange_code(code)
-            .set_pkce_verifier(pkce_verifier)
-            .request(&http_client)
-    })
-    .await
-    .map_err(|e| AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| match e {
-        RequestTokenError::ServerResponse(_) => AppError::Unauthorised,
-        RequestTokenError::Request(error) => {
-            web_sys::console::log_1(&"Request error".into());
-            AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-        }
-        RequestTokenError::Parse(error, bits) => {
-            web_sys::console::log_1(&String::from_utf8(bits).unwrap().into());
-            AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-        }
-        RequestTokenError::Other(message) => {
-            web_sys::console::log_1(&"Other error".into());
-            AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, message)
-        }
-    })?;
+    let token_response = client
+        .exchange_code(code)
+        .set_pkce_verifier(pkce_verifier)
+        .request_async(&http_client)
+        .await
+        .map_err(|e| AppError::Generic(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    web_sys::console::log_1(&"Fetched access token".to_string().into());
     let access_token = token_response.access_token().secret();
 
     // Fetch user ID, creating a user if they don't already exist
-    let user = ureq::get("https://api.github.com/user")
-        .header(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {access_token}")).unwrap(),
-        )
-        .header(
-            ACCEPT,
-            HeaderValue::from_str("application/vnd.github+json").unwrap(),
-        )
-        .header(
-            "X-Github-Api-Version",
-            HeaderValue::from_str("2022-11-28").unwrap(),
-        )
-        .header(
-            USER_AGENT,
-            HeaderValue::from_str("hanyuone.live Comments").unwrap(),
-        )
-        .call()?
-        .body_mut()
-        .read_json::<GithubUser>()?;
+    let mut headers = HeaderMap::new();
+    headers.append(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {access_token}")).unwrap(),
+    );
+    headers.append(
+        ACCEPT,
+        HeaderValue::from_str("application/vnd.github+json").unwrap(),
+    );
+    headers.append(
+        "X-Github-Api-Version",
+        HeaderValue::from_str("2022-11-28").unwrap(),
+    );
+    headers.append(
+        USER_AGENT,
+        HeaderValue::from_str("hanyuone.live Comments").unwrap(),
+    );
+
+    let mut user_req_init = RequestInit::new();
+    let user_req_init = user_req_init.with_headers(headers.into());
+    let user_req = worker::Request::new_with_init("https://api.github.com/user", user_req_init)?;
+
+    let user = Fetch::Request(user_req)
+        .send()
+        .await?
+        .json::<GithubUser>()
+        .await?;
 
     let user_statement = d1.prepare("SELECT id FROM Users WHERE username = ?");
     let user_query = user_statement.bind(&[user.login.clone().into()])?;
@@ -290,9 +280,14 @@ pub async fn get_session(
         ])?;
     session_statement.run().await?;
 
+    web_sys::console::log_1(
+        &format!("Redirecting to URL {}", state.return_url.clone())
+            .as_str()
+            .into(),
+    );
+
     // Set session as cookie
     let jar = jar.add(Cookie::build(("session_id", session_id)).expires(expires_at));
-
     Ok((jar, Redirect::to(&state.return_url)))
 }
 

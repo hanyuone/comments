@@ -10,17 +10,6 @@ release = false
 [lib]
 crate-type = ["cdylib"]
 
-# FIXME: Some dependencies pose severe-ish problems, and are very slowly
-# updated (or not updated at all).
-# - `ring` uses an old version of `getrandom` (0.2), which is deprecated for WASM.
-#   Relevant details found here: https://github.com/briansmith/ring/issues/2341
-# - `oauth2` has not been maintained for the past 6 months, and has a host of problems:
-#   - `oauth2` uses an old version of `rand` (0.8), which uses the deprecated version
-#     of `getrandom`.
-#   - The default HTTP client, `reqwest`, does not support zero-redirects in WASM
-#     because of undefined behaviour, see here: https://github.com/seanmonstar/reqwest/pull/2119
-#   - `oauth2` also uses an old version of `ureq` (2), which is deprecated.
-# - `ureq` currently does not support WASM.
 [dependencies]
 axum = { version = "0.8.4", features = [
     "json",
@@ -28,20 +17,24 @@ axum = { version = "0.8.4", features = [
 ], default-features = false }
 axum-extra = { version = "0.10.1", features = ["cookie"] }
 console_error_panic_hook = { version = "0.1.7" }
+futures-util = "0.3.31"
 http = "1.3.1"
 serde = "1.0.219"
 time = { version = "0.3.43", features = ["wasm-bindgen"] }
 tokio = "1.47.1"
 tower-http = { version = "0.6.6", features = ["cors"] }
 tower-service = "0.3.3"
-ureq = { version = "3.1.1", features = ["json"] }
 uuid = { version = "1.18.1", features = ["v7", "rng-rand"] }
+wasm-bindgen-futures = "0.4.51"
+wasm-streams = "0.4.2"
 web-sys = "0.3.77"
 worker = { version = "0.6", features = ["http", "axum", "d1"] }
 worker-macros = { version = "0.6" }
-oauth2 = { path = "../oauth2-rs", features = ["ureq"] }
+# Patched `rand` version to ^0.9
+oauth2 = { path = "../oauth2-rs", default-features = false }
 # Added as dependency to ensure that feature is used transitively
 ring = { version = "0.17.14", features = ["wasm32_unknown_unknown_js"] }
 
 [patch.crates-io]
+# Patched `getrandom` version to ^0.3
 ring = { path = "../ring" }

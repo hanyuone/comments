@@ -7,16 +7,8 @@ pub(crate) enum AppError {
     PostNotFound(String),
     // Catch-all error, usually used to map to
     Generic(StatusCode, String),
-    // Errors with `ureq`
-    UreqError(ureq::Error),
     // Errors with Cloudflare Workers
     WorkerError(worker::Error),
-}
-
-impl From<ureq::Error> for AppError {
-    fn from(value: ureq::Error) -> Self {
-        AppError::UreqError(value)
-    }
 }
 
 impl From<worker::Error> for AppError {
@@ -34,12 +26,6 @@ impl IntoResponse for AppError {
                 format!("Could not find post with slug {slug} in database"),
             ),
             AppError::Generic(status_code, message) => (status_code, message),
-            AppError::UreqError(error) => match error {
-                ureq::Error::StatusCode(code) => {
-                    (StatusCode::from_u16(code).unwrap(), error.to_string())
-                }
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-            },
             AppError::WorkerError(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         }
         .into_response()
