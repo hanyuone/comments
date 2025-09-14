@@ -42,14 +42,14 @@ fn get_client(
 
     // On the client side, redirect back to `/oauth/github`, which will call `/auth/return`
     // to get the access token
-    let protocol = if hostname.starts_with("localhost") || hostname.starts_with("127.0.0.1") {
-        "http"
+    let raw_redirect_url = if hostname.starts_with("localhost") || hostname.starts_with("127.0.0.1") {
+        format!("http://{}:8787/auth/session", hostname)
     } else {
-        "https"
+        format!("https://{}/auth/session", hostname)
     };
 
     let redirect_url =
-        RedirectUrl::new(format!("{}://{}/auth/session", protocol, hostname)).unwrap();
+        RedirectUrl::new(raw_redirect_url).unwrap();
 
     let client = BasicClient::new(client_id)
         .set_client_secret(client_secret)
@@ -191,21 +191,21 @@ pub async fn get_session(
 ) -> Result<(CookieJar, Redirect), AppError> {
     let d1 = state.env.d1("DB")?;
 
-    let client = get_client(state, host);
+    let client = get_client(state.clone(), host);
 
     // Fetch state left over from `/auth/login`
-    let state = CsrfToken::new(query.state);
+    let state_token = CsrfToken::new(query.state);
     let code = AuthorizationCode::new(query.code);
 
     let fetch_state_statement = d1
         .prepare("DELETE FROM OAuthState WHERE csrf_token = ? RETURNING pkce_verifier, return_url")
-        .bind(&[state.secret().into()])?;
-    let state = fetch_state_statement
+        .bind(&[state_token.secret().into()])?;
+    let oauth_state = fetch_state_statement
         .first::<OAuthState>(None)
         .await?
         .ok_or(AppError::Unauthorised)?;
 
-    let pkce_verifier = PkceCodeVerifier::new(state.pkce_verifier);
+    let pkce_verifier = PkceCodeVerifier::new(oauth_state.pkce_verifier);
     let http_client = WorkerClient::new();
 
     // Fetch access token from server
@@ -284,7 +284,7 @@ pub async fn get_session(
     session_statement.run().await?;
 
     web_sys::console::log_1(
-        &format!("Redirecting to URL {}", state.return_url.clone())
+        &format!("Redirecting to URL {}", oauth_state.return_url.clone())
             .as_str()
             .into(),
     );
@@ -292,13 +292,12 @@ pub async fn get_session(
     // Set session as cookie
     let jar = jar.add(
         Cookie::build(("session_id", session_id))
-            .domain(".hanyuone.live")
             .path("/")
             .expires(expires_at)
             .http_only(true)
             .same_site(SameSite::Strict),
     );
-    Ok((jar, Redirect::to(&state.return_url)))
+    Ok((jar, Redirect::to(&oauth_state.return_url)))
 }
 
 /// Logs a user out by removing their session cookie.
