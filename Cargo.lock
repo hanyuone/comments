@@ -208,7 +208,6 @@ dependencies = [
  "ring",
  "serde",
  "time",
- "tokio",
  "tower-http",
  "tower-service",
  "uuid",

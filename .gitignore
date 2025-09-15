@@ -1,5 +1,8 @@
 target
 node_modules
+# Local files generated from `npx wrangler dev`
 .wrangler
+# Environment files, set up according to CF Workers specs
 .env.*
+# VSCode variables for language server
 .vscode
