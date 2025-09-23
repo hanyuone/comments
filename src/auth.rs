@@ -72,9 +72,7 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // Fetch session ID
-    web_sys::console::log_1(&"Triggering auth middleware".into());
-
+    // Fetch session ID from cookies
     let headers = request.headers();
     let cookie_jar = CookieJar::from_headers(headers);
 
@@ -87,7 +85,7 @@ pub async fn auth_middleware(
     let d1 = state.env.d1("DB")?;
 
     let auth_statement = d1
-        .prepare("SELECT (user_id, expires_at) FROM UserSessions WHERE id = ?")
+        .prepare("SELECT user_id, expires_at FROM UserSessions WHERE id = ?")
         .bind(&[session_cookie.value().into()])?;
 
     let Some(session_fields) = auth_statement.first::<SessionVerifyFields>(None).await? else {
