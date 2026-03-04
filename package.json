@@ -4,6 +4,8 @@
     "wrangler": "^4.36.0"
   },
   "scripts": {
+    "build:install": "cargo install -q worker-build",
+    "build": "npx build:install && worker-build release",
     "postinstall": "patch-package"
   }
 }
