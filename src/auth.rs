@@ -42,14 +42,14 @@ fn get_client(
 
     // On the client side, redirect back to `/oauth/github`, which will call `/auth/return`
     // to get the access token
-    let raw_redirect_url = if hostname.starts_with("localhost") || hostname.starts_with("127.0.0.1") {
+    let raw_redirect_url = if hostname.starts_with("localhost") || hostname.starts_with("127.0.0.1")
+    {
         format!("http://{}:8787/auth/session", hostname)
     } else {
         format!("https://{}/auth/session", hostname)
     };
 
-    let redirect_url =
-        RedirectUrl::new(raw_redirect_url).unwrap();
+    let redirect_url = RedirectUrl::new(raw_redirect_url).unwrap();
 
     let client = BasicClient::new(client_id)
         .set_client_secret(client_secret)
