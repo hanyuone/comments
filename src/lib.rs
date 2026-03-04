@@ -141,7 +141,7 @@ async fn fetch(
         .allow_credentials(true)
         .allow_headers([axum::http::header::CONTENT_TYPE])
         .allow_origin([
-            "http://127.0.0.1:8080".parse().unwrap(),
+            "http://127.0.0.1:3000".parse().unwrap(),
             "https://hanyuone.live".parse().unwrap(),
         ]);
 
