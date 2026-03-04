@@ -1,0 +1,3 @@
+[submodule "patches/cargo/oauth2-rs"]
+	path = patches/cargo/oauth2-rs
+	url = https://github.com/hanyuone/oauth2-rs
