@@ -24,20 +24,19 @@ serde = "1.0.219"
 time = { version = "0.3.43", features = ["wasm-bindgen"] }
 tower-http = { version = "0.6.6", features = ["cors"] }
 tower-service = "0.3.3"
-uuid = { version = "1.21.0", features = ["v7", "rng-rand"] }
+uuid = { version = "1.22.0", features = ["v7", "rng-rand"] }
 wasm-bindgen-futures = "0.4.51"
 wasm-streams = "0.5.0"
 web-sys = "0.3.77"
 worker = { version = "0.7", features = ["http", "axum", "d1"] }
 worker-macros = { version = "0.6" }
 # Added as dependency to ensure that feature is used transitively
-ring = { version = "0.17.14", features = ["wasm32_unknown_unknown_js"] }
+ring = { version = "0.17.16000", features = ["wasm32_unknown_unknown_js"] }
 
 [patch.crates-io]
 # Patch `rand` version to be `0.10` in `oauth2`. This is blocked
 # on the main repo as the author does not want to create a new
 # major version, see https://github.com/ramosbugs/oauth2-rs/pull/306
 oauth2 = { path = "patches/cargo/oauth2-rs/oauth2" }
-# The author is currently in the process of updating `getrandom`
-# to `0.4`
-ring = { git = "https://github.com/briansmith/ring", branch = "b/getrandom-0.4" }
+# Delete once author releases new version onto `crates.io`
+ring = { git = "https://github.com/briansmith/ring" }
